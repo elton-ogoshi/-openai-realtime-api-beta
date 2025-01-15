@@ -120,4 +120,103 @@ export async function run({ debug = false } = {}) {
       });
     });
   });
+
+  describe('RealtimeClient (Browser/WebRTC)', () => {
+    let client;
+    let realtimeEvents = [];
+
+    before(async () => {
+      // Mock browser environment
+      globalThis.document = {};
+      globalThis.RTCPeerConnection = class MockRTCPeerConnection {
+        constructor() { this.connectionState = 'new'; }
+        createDataChannel() { return { readyState: 'open' }; }
+      };
+    });
+
+    after(async () => {
+      delete globalThis.document;
+      delete globalThis.RTCPeerConnection;
+    });
+
+    beforeEach(() => {
+      realtimeEvents = [];
+    });
+
+    afterEach(() => {
+      if (client?.isConnected()) {
+        client.disconnect();
+      }
+      delete globalThis.fetch;
+    });
+
+    it('Should require ephemeralKey or fetchEphemeralKeyUrl for WebRTC in browser', () => {
+      expect(() => new RealtimeClient({ transport: 'webrtc' }))
+        .to.throw('Either ephemeralKey or fetchEphemeralKeyUrl is required');
+    });
+
+    it('Should automatically fetch ephemeral key when using fetchEphemeralKeyUrl', async () => {
+      // Mock both the SDP answer and ephemeral key responses
+      let fetchCount = 0;
+      globalThis.fetch = async (url) => {
+        fetchCount++;
+        if (url === '/api/ephemeral') {
+          return new Response(JSON.stringify({ ephemeral_key: 'mock-auto-key' }));
+        }
+        return new Response(JSON.stringify({ type: 'answer', sdp: 'mock-sdp-answer' }));
+      };
+
+      client = new RealtimeClient({
+        transport: 'webrtc',
+        fetchEphemeralKeyUrl: '/api/ephemeral',
+        debug: true
+      });
+
+      client.on('realtime.event', (event) => realtimeEvents.push(event));
+
+      await client.connect();
+      expect(client.ephemeralKey).to.equal('mock-auto-key');
+      expect(client.isConnected()).to.be.true;
+      expect(fetchCount).to.equal(2); // One for key, one for SDP
+    });
+
+    it('Should handle ephemeral key fetch failures', async () => {
+      globalThis.fetch = async (url) => {
+        if (url === '/api/ephemeral') {
+          return new Response('Unauthorized', { status: 401 });
+        }
+        return new Response(JSON.stringify({ type: 'answer', sdp: 'mock-sdp-answer' }));
+      };
+
+      client = new RealtimeClient({
+        transport: 'webrtc',
+        fetchEphemeralKeyUrl: '/api/ephemeral',
+        debug: true
+      });
+
+      try {
+        await client.connect();
+        expect.fail('Should throw error on key fetch failure');
+      } catch (error) {
+        expect(error.message).to.include('Failed to fetch ephemeral key');
+        expect(client.isConnected()).to.be.false;
+      }
+    });
+
+    it('Should support manual ephemeral key provision', async () => {
+      globalThis.fetch = async () => {
+        return new Response(JSON.stringify({ type: 'answer', sdp: 'mock-sdp-answer' }));
+      };
+
+      client = new RealtimeClient({
+        transport: 'webrtc',
+        ephemeralKey: 'manual-key',
+        debug: true
+      });
+
+      await client.connect();
+      expect(client.ephemeralKey).to.equal('manual-key');
+      expect(client.isConnected()).to.be.true;
+    });
+  });
 }
